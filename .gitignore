@@ -1,0 +1,5 @@
+/.claude/
+*.out
+*.test
+/coverage.out
+/cover.out
