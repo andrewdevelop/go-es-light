@@ -1,6 +1,7 @@
 package es_test
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -133,5 +134,53 @@ func TestEventNotifier_ConcurrentSubscribeAndNotify(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for all concurrent waiters to wake")
+	}
+}
+
+func TestNotifierListener_Kind(t *testing.T) {
+	l := &es.NotifierListener{Notifier: es.NewEventNotifier()}
+	if l.Kind() != es.Projector {
+		t.Fatalf("expected NotifierListener to be a Projector, got %v", l.Kind())
+	}
+}
+
+func TestNotifierListener_HandleNotifiesWaiters(t *testing.T) {
+	n := es.NewEventNotifier()
+	l := &es.NotifierListener{Notifier: n}
+	aggID := uuid.New()
+
+	ch := n.Subscribe(aggID, 1)
+
+	if err := l.Handle(context.Background(), &es.DomainEvent{AggregateID: aggID, AggregateVersion: 1}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("expected Handle to notify the waiter")
+	}
+}
+
+// TestNotifierListener_WiredIntoDispatcher is the pattern the package doc
+// recommends: subscribe NotifierListener to a dispatcher like any other
+// listener (here via the "*" wildcard) instead of calling Notify by hand
+// from a projector's event loop.
+func TestNotifierListener_WiredIntoDispatcher(t *testing.T) {
+	notifier := es.NewEventNotifier()
+	d := es.NewEventDispatcher()
+	d.Subscribe("*", &es.NotifierListener{Notifier: notifier})
+
+	aggID := uuid.New()
+	ch := notifier.Subscribe(aggID, 3)
+
+	if err := d.Dispatch(context.Background(), &es.DomainEvent{AggregateID: aggID, AggregateVersion: 3, Name: "anything"}); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("expected Dispatch to have run NotifierListener and woken the waiter")
 	}
 }

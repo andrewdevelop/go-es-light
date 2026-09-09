@@ -186,15 +186,21 @@ effect actually is (see `TASK.md`).
 ## Event dispatcher
 
 `es.EventDispatcher` is an optional layer for fanning an event out to every
-subscribed listener. Two kinds of listener, with different error
-semantics:
+subscribed listener. Two kinds of listener, with different ordering and
+error semantics:
 
-- `Projector` — its error is returned to the caller (strict ordering is
-  required; a failed projection can't be silently swallowed);
+- `Projector` — runs synchronously, one at a time, **in the order it was
+  registered with `Subscribe`**, never concurrently with another Projector.
+  A later Projector can rely on an earlier one having already run for this
+  event; its error is returned to the caller and stops the rest of the
+  Projector chain for this event (a failed projection can't be silently
+  swallowed);
 - `Reactor` — a side effect (calling an external API, sending an email,
-  ...), its error is only logged; the whole class of reactors can be
-  switched off at once via `HandleSideEffects(false)` — e.g. while
-  replaying history, when emails and webhooks must not fire again.
+  ...), started in its own goroutine and never waited for — a slow or
+  failing Reactor can't delay Dispatch's return or the Projector chain.
+  Its error is only logged; the whole kind can be switched off at once via
+  `HandleSideEffects(false)` — e.g. while replaying history, when emails
+  and webhooks must not fire again.
 
 The quick way — wrap a function with the `es.NewProjector`/`es.NewReactor`
 helpers:
@@ -247,11 +253,21 @@ The version removes both: `Subscribe` returns an already-closed channel
 immediately if that version has already been projected, and `Notify` only
 wakes waiters whose `minVersion` has actually been reached.
 
+Wire it in as an `es.NotifierListener` — a `Projector` itself — rather than
+calling `Notify` by hand from inside a projector's event loop; that keeps
+"update the read model" and "wake up waiters" as two separate listeners.
+**Subscribe it after** every read-model `Projector` a waiter should be able
+to rely on having run: Dispatch's registration-order guarantee (see "Event
+dispatcher" above) is exactly what makes this safe — if `NotifierListener`
+were registered first, or the read model were updated by a `Reactor`
+instead of a `Projector`, a waiter could wake up before the read model
+actually reflects the write.
+
 ```go
 notifier := es.NewEventNotifier()
 
-// in the projector — once Dispatch has run event's Projector listeners:
-notifier.Notify(event)
+dispatcher.Subscribe(domain.AllUserEvents, &readmodel.UserProjector{Store: views}) // updates the read model
+dispatcher.Subscribe("*", &es.NotifierListener{Notifier: notifier})                 // wakes waiters — registered last
 
 // in the handler — after Save:
 select {

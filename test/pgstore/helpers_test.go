@@ -37,6 +37,11 @@ func newStore(t *testing.T) (*pgstore.Store, *sql.DB) {
 	}
 	t.Cleanup(func() { db.Close() })
 
+	// Bounded so this package's pools plus test/user's (run concurrently by
+	// `go test` when both packages are given on one command line) don't
+	// blow past Postgres's default max_connections=100 between them.
+	db.SetMaxOpenConns(10)
+
 	if err := db.PingContext(context.Background()); err != nil {
 		t.Fatalf("ping database at PGSTORE_TEST_DSN: %v", err)
 	}

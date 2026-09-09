@@ -44,20 +44,21 @@ func main() {
 	userReadModelProjector := &readmodel.UserProjector{Store: views}
 	userEmailReactor := &notifier.WelcomeEmailReactor{Notifier: welcomeEmails}
 
+	// projectionReady lets a caller wait for the read model to actually
+	// reflect a given write instead of guessing with a fixed sleep —
+	// without making the write itself synchronous. Wired in as a
+	// NotifierListener rather than called by hand from the projector loop
+	// below: building the read model and waking up waiters are two
+	// separate responsibilities, and the loop's only job stays "run
+	// whatever's subscribed". Subscribed via the "*" wildcard so it
+	// notifies for every event regardless of how many other listeners
+	// (read-model projectors, reactors) are also registered.
+	projectionReady := es.NewEventNotifier()
+
 	dispatcher := es.NewEventDispatcher()
 	dispatcher.Subscribe(domain.AllUserEvents, userReadModelProjector)
 	dispatcher.Subscribe(domain.UserRegistered, userEmailReactor)
-
-	// projectionReady lets a caller wait for the read model to actually
-	// reflect a given write instead of guessing with a fixed sleep —
-	// without making the write itself synchronous. It's notified once per
-	// event, right after that event's Projector listeners have run, keyed
-	// by (aggregate ID, version) rather than just aggregate ID: waiting on
-	// "this aggregate got *some* update" is racy (a waiter registered after
-	// the projector already ran would hang forever; one woken by an
-	// unrelated concurrent write to the same aggregate would wake too
-	// early, before its own write landed).
-	projectionReady := es.NewEventNotifier()
+	dispatcher.Subscribe("*", &es.NotifierListener{Notifier: projectionReady})
 
 	// In a real app this runs as its own worker, behind a Postgres advisory
 	// lock (es/pgstore.AdvisoryLock) so exactly one instance ever builds the
@@ -67,9 +68,7 @@ func main() {
 		for e := range out {
 			if err := dispatcher.Dispatch(ctx, e); err != nil {
 				fmt.Println("dispatch error:", err)
-				continue
 			}
-			projectionReady.Notify(e)
 		}
 		for err := range errc {
 			if err != nil {

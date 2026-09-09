@@ -1,6 +1,7 @@
 package es
 
 import (
+	"context"
 	"sync"
 
 	"github.com/google/uuid"
@@ -23,6 +24,14 @@ import (
 // caller asked for removes both failure modes: Subscribe returns an
 // already-closed channel if that version was already reached, and Notify
 // only wakes waiters whose minVersion has actually been satisfied.
+//
+// Don't call Notify by hand from inside a projector's event loop — that
+// couples "update the read model" and "wake up waiters" into the same
+// piece of code, and whoever writes the read model has to remember to also
+// poke the notifier. Wrap it in a NotifierListener and register that with
+// the same EventDispatcher your read-model projectors use instead; it's
+// then just another listener, wired once, independent of however many
+// projectors exist or what aggregates they're for.
 type EventNotifier struct {
 	mu            sync.Mutex
 	lastProjected map[uuid.UUID]uint64
@@ -62,9 +71,8 @@ func (n *EventNotifier) Subscribe(aggID uuid.UUID, minVersion uint64) <-chan str
 
 // Notify records that event's aggregate has been projected through
 // event.AggregateVersion, and wakes every waiter whose minVersion is now
-// satisfied. Call it after the projector has successfully applied event —
-// e.g. right after an es.EventDispatcher.Dispatch(ctx, event) call returns
-// nil for that event.
+// satisfied. Called by NotifierListener.Handle — see its doc comment for
+// how to wire it into an EventDispatcher instead of calling Notify by hand.
 func (n *EventNotifier) Notify(event *DomainEvent) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -92,4 +100,35 @@ func (n *EventNotifier) Notify(event *DomainEvent) {
 	} else {
 		n.waiters[event.AggregateID] = remaining
 	}
+}
+
+var _ EventListener = (*NotifierListener)(nil)
+
+// NotifierListener adapts an EventNotifier into an EventListener, so
+// "notify waiters" is wired into an EventDispatcher exactly like a
+// read-model projector, and not hand-called from application code.
+// Subscribe it once, typically with the "*" wildcard pattern so it wakes
+// waiters for every aggregate regardless of how many other listeners
+// (read-model projectors, reactors) are also registered — and subscribe it
+// AFTER every Projector a waiter should be able to rely on having run:
+//
+//	dispatcher.Subscribe(domain.AllUserEvents, &readmodel.UserProjector{Store: views})
+//	dispatcher.Subscribe("*", &es.NotifierListener{Notifier: notifier}) // last
+//
+// Kind is Projector, and Dispatch runs Projectors one at a time in
+// registration order (see Dispatch) — that ordering is what guarantees
+// NotifierListener only wakes a waiter once the read-model projector
+// registered before it has actually applied the event. Subscribing it
+// first, or interleaving it with unrelated Projectors, gives no such
+// guarantee. Reactor listeners are never part of this ordering (see
+// Dispatch) — a waiter shouldn't and doesn't wait on them.
+type NotifierListener struct {
+	Notifier *EventNotifier
+}
+
+func (l *NotifierListener) Kind() ListenerKind { return Projector }
+
+func (l *NotifierListener) Handle(_ context.Context, event *DomainEvent) error {
+	l.Notifier.Notify(event)
+	return nil
 }

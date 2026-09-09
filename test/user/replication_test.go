@@ -58,6 +58,12 @@ func newReplica(t *testing.T, dsn string) *replica {
 	}
 	t.Cleanup(func() { db.Close() })
 
+	// Bounded so several replicas' pools (plus test/pgstore's, run
+	// concurrently by `go test` when both packages are given on one
+	// command line) don't blow past Postgres's default
+	// max_connections=100 between them.
+	db.SetMaxOpenConns(5)
+
 	store := pgstore.New(db, dsn)
 	repo := es.NewRepository[*domain.User](store, domain.Events(), func() *domain.User { return &domain.User{} })
 

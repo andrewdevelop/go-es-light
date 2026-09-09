@@ -131,6 +131,16 @@ func TestPgstore_Commit_PartialBatchIsAtomic(t *testing.T) {
 	}
 }
 
+// TestPgstore_FetchAfter_Pagination pages through the *entire* events
+// table with a small limit, not just this test's own aggregate: the table
+// is shared with whatever else is running against the same database (e.g.
+// test/user's integration tests, when both packages are given to `go test`
+// on one command line and run as concurrent binaries), so other aggregates'
+// events can legitimately land between this one's in global_id order. The
+// test only asserts what must hold regardless of that interleaving: pages
+// never exceed the requested limit, the cursor strictly increases, and —
+// filtering every page down to this test's own aggregate — its 7 events
+// come back in order, with no gaps or duplicates.
 func TestPgstore_FetchAfter_Pagination(t *testing.T) {
 	store, _ := newStore(t)
 	ctx := context.Background()
@@ -148,29 +158,46 @@ func TestPgstore_FetchAfter_Pagination(t *testing.T) {
 		}
 	}
 
-	page1, err := store.FetchAfter(ctx, lastGlobalID, 3)
-	if err != nil {
-		t.Fatalf("FetchAfter page1: %v", err)
+	var mine []*es.DomainEvent
+	cursor := lastGlobalID
+	for page := 0; len(mine) < total; page++ {
+		if page > 10_000 {
+			t.Fatalf("paginated %d times without finding all %d of this test's own events — got %d, foreign traffic must be unbounded", page, total, len(mine))
+		}
+
+		events, err := store.FetchAfter(ctx, cursor, 3)
+		if err != nil {
+			t.Fatalf("FetchAfter: %v", err)
+		}
+		if len(events) == 0 {
+			t.Fatal("FetchAfter returned no events before finding all of this test's own — cursor made no progress")
+		}
+		if len(events) > 3 {
+			t.Fatalf("expected at most 3 events per page, got %d", len(events))
+		}
+
+		for i, e := range events {
+			if i > 0 && e.GlobalID <= events[i-1].GlobalID {
+				t.Fatal("events within a page are not strictly increasing by global_id")
+			}
+			if e.GlobalID <= cursor {
+				t.Fatal("page did not strictly advance past the requested cursor")
+			}
+			if e.AggregateID == aggID {
+				mine = append(mine, e)
+			}
+		}
+		cursor = events[len(events)-1].GlobalID
 	}
-	if len(page1) != 3 {
-		t.Fatalf("expected page of 3, got %d", len(page1))
+
+	if len(mine) != total {
+		t.Fatalf("expected exactly %d of this test's own events, got %d", total, len(mine))
 	}
-	page2, err := store.FetchAfter(ctx, page1[len(page1)-1].GlobalID, 3)
-	if err != nil {
-		t.Fatalf("FetchAfter page2: %v", err)
-	}
-	if len(page2) != 3 {
-		t.Fatalf("expected page of 3, got %d", len(page2))
-	}
-	page3, err := store.FetchAfter(ctx, page2[len(page2)-1].GlobalID, 3)
-	if err != nil {
-		t.Fatalf("FetchAfter page3: %v", err)
-	}
-	if len(page3) != 1 {
-		t.Fatalf("expected final page of 1, got %d", len(page3))
-	}
-	if page1[0].GlobalID >= page1[2].GlobalID || page2[0].GlobalID <= page1[2].GlobalID {
-		t.Fatal("pages are not strictly increasing by global_id")
+	for i, e := range mine {
+		wantVersion := uint64(i + 1)
+		if e.AggregateVersion != wantVersion {
+			t.Fatalf("event %d: expected aggregate_version %d, got %d (gap/duplicate/reorder)", i, wantVersion, e.AggregateVersion)
+		}
 	}
 }
 

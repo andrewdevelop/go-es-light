@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go-es-light/es"
 )
@@ -51,9 +52,9 @@ func TestDispatcher_ProjectorErrorPropagates(t *testing.T) {
 func TestDispatcher_ReactorErrorDoesNotPropagate(t *testing.T) {
 	d := es.NewEventDispatcher()
 
-	var called atomic.Bool
+	ran := make(chan struct{})
 	d.Subscribe("SubscriptionActivated", es.NewReactor(func(context.Context, *es.DomainEvent) error {
-		called.Store(true)
+		close(ran)
 		return errors.New("side effect failed")
 	}))
 
@@ -61,8 +62,45 @@ func TestDispatcher_ReactorErrorDoesNotPropagate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected reactor errors to be swallowed (only logged), got %v", err)
 	}
-	if !called.Load() {
+
+	// Reactors are detached from Dispatch (see TestDispatcher_DoesNotWaitForReactors),
+	// so give it a moment to actually run instead of checking immediately.
+	select {
+	case <-ran:
+	case <-time.After(time.Second):
 		t.Fatal("expected reactor to have run")
+	}
+}
+
+// TestDispatcher_DoesNotWaitForReactors proves the fix this test file's
+// TestDispatcher_ReactorErrorDoesNotPropagate depends on: a slow Reactor
+// must never delay Dispatch's return, since callers (e.g. an
+// es.NotifierListener waking up a reader) treat that return as "this
+// event's Projector listeners have run" and shouldn't be held hostage by
+// an unrelated side effect like a slow email send.
+func TestDispatcher_DoesNotWaitForReactors(t *testing.T) {
+	d := es.NewEventDispatcher()
+
+	const reactorDelay = 500 * time.Millisecond
+	reactorDone := make(chan struct{})
+	d.Subscribe("SubscriptionActivated", es.NewReactor(func(context.Context, *es.DomainEvent) error {
+		time.Sleep(reactorDelay)
+		close(reactorDone)
+		return nil
+	}))
+
+	start := time.Now()
+	if err := d.Dispatch(context.Background(), &es.DomainEvent{Name: "SubscriptionActivated"}); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= reactorDelay {
+		t.Fatalf("expected Dispatch to return well before the reactor's %v sleep, took %v", reactorDelay, elapsed)
+	}
+
+	select {
+	case <-reactorDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reactor never ran to completion")
 	}
 }
 
@@ -144,5 +182,74 @@ func TestDispatcher_DotNotationPrefixWildcard(t *testing.T) {
 	}
 	if userCalls.Load() != 2 {
 		t.Fatalf("expected \"user.*\" to require a prefix match, got %d calls", userCalls.Load())
+	}
+}
+
+// TestDispatcher_ProjectorsRunInRegistrationOrder is the guarantee
+// es.NotifierListener's doc comment depends on: two Projectors for the
+// same event run one at a time, in the order they were Subscribed, not
+// concurrently — the second must observe the first's effect.
+func TestDispatcher_ProjectorsRunInRegistrationOrder(t *testing.T) {
+	d := es.NewEventDispatcher()
+
+	var shared atomic.Int32
+	var secondSawFirstsEffect atomic.Bool
+
+	d.Subscribe("*", es.NewProjector(func(context.Context, *es.DomainEvent) error {
+		shared.Store(1)
+		return nil
+	}))
+	d.Subscribe("*", es.NewProjector(func(context.Context, *es.DomainEvent) error {
+		secondSawFirstsEffect.Store(shared.Load() == 1)
+		return nil
+	}))
+
+	if err := d.Dispatch(context.Background(), &es.DomainEvent{Name: "anything"}); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if !secondSawFirstsEffect.Load() {
+		t.Fatal("expected the second-registered Projector to run after (and observe) the first's effect")
+	}
+}
+
+// TestDispatcher_FailedProjectorSkipsLaterProjectorsButNotReactors verifies
+// the short-circuit behavior documented on Dispatch: once a Projector
+// fails, later Projectors in the chain are skipped, but Reactors still run
+// regardless of their position relative to the failure.
+func TestDispatcher_FailedProjectorSkipsLaterProjectorsButNotReactors(t *testing.T) {
+	d := es.NewEventDispatcher()
+	wantErr := errors.New("first projector failed")
+
+	var secondProjectorRan, reactorRan atomic.Bool
+	reactorDone := make(chan struct{})
+
+	d.Subscribe("*", es.NewProjector(func(context.Context, *es.DomainEvent) error {
+		return wantErr
+	}))
+	d.Subscribe("*", es.NewProjector(func(context.Context, *es.DomainEvent) error {
+		secondProjectorRan.Store(true)
+		return nil
+	}))
+	d.Subscribe("*", es.NewReactor(func(context.Context, *es.DomainEvent) error {
+		reactorRan.Store(true)
+		close(reactorDone)
+		return nil
+	}))
+
+	err := d.Dispatch(context.Background(), &es.DomainEvent{Name: "anything"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected the first projector's error, got %v", err)
+	}
+	if secondProjectorRan.Load() {
+		t.Fatal("expected the second Projector to be skipped after the first failed")
+	}
+
+	select {
+	case <-reactorDone:
+	case <-time.After(time.Second):
+		t.Fatal("expected the Reactor to still run despite the earlier Projector's failure")
+	}
+	if !reactorRan.Load() {
+		t.Fatal("expected the Reactor to have run")
 	}
 }
