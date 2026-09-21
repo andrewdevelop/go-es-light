@@ -7,7 +7,9 @@ once events already live in Postgres; see the reasoning in `TASK.md`).
 ## Structure
 
 - `es` — the core: `DomainEvent`, `BaseAggregate`, the `EventStore` /
-  `Checkpointer` / `EventRegistry` interfaces, generic `Repository[T]`.
+  `Checkpointer` / `EventRegistry` interfaces, generic `Repository[T]`, and
+  `PiiEventStore` — an `EventStore` decorator, not a `Repository` concern,
+  since PII-at-rest is a property of the store itself (see below).
 - `es/memstore` — an in-memory `EventStore` + `Checkpointer`, for tests and
   examples.
 - `es/pgstore` — a Postgres backend directly on `database/sql` + `lib/pq`,
@@ -15,8 +17,9 @@ once events already live in Postgres; see the reasoning in `TASK.md`).
   transaction-scoped advisory lock, `StreamAll` via `LISTEN/NOTIFY` (a
   dedicated `pq.Listener`) + polling fallback, `AdvisoryLock` for projector
   leader election. Reading events (`Load`/`FetchAfter`) uses a fixed column
-  order with positional `Rows.Scan`, no reflection. Schema in
-  `es/pgstore/schema.sql`.
+  order with positional `Rows.Scan`, no reflection. No schema file to apply
+  by hand — call `Store.Migrate` once (idempotent, works against a
+  brand-new empty database).
 - `examples/user` — registering/updating a user, laid out the way a real
   application on a hexagonal architecture would be (no router, no real SQL
   views — the read model here is in-memory):
@@ -25,9 +28,12 @@ once events already live in Postgres; see the reasoning in `TASK.md`).
   - `app/` — use cases (`UserService`) + the ports they need
     (`UserRepository` = `es.Repository[*domain.User]`, `ReadModel`,
     `Notifier`); depends only on `domain`;
-  - `adapters/eventstore/` — driven adapter for persistence
-    (`memstore`-backed `UserRepository`; swap it for `es/pgstore` and
-    nothing above it needs to change);
+  - persistence has no `adapters/` package of its own — `es/memstore`
+    already is the driven adapter for `UserRepository`'s underlying
+    `es.EventStore`, wired up explicitly in `main.go`'s composition root
+    (no constructor hiding that wiring behind a `New()` call in another
+    package); swap it for `es/pgstore` there and nothing above it needs to
+    change;
   - `adapters/readmodel/` — driven adapter for `ReadModel`: an in-memory
     read model + the exported `UserProjector` (`es.EventListener`,
     `Kind() == Projector`) that keeps it in sync;
@@ -37,6 +43,25 @@ once events already live in Postgres; see the reasoning in `TASK.md`).
   - `main.go` — the composition root; it also stands in for the
     driving/inbound adapter, calling `app.UserService` directly instead of
     an HTTP/gRPC handler.
+- `examples/ledger` — more down-to-earth than `examples/user`, no hexagonal
+  ceremony: a small multi-tenant general ledger (2 organizations, 3 accounts
+  each, 3 transactions posted concurrently per account with reload-and-retry
+  on `ErrConcurrencyConflict`), built to exercise essentially every opt-in
+  feature together — `WithTenant`/`WithAllTenants`/`TenantScopedStore`,
+  `WithActor`/`WithMetadata`/`WithOccurredAt`/`WithEventID`/
+  `WithEventVersion`, `WithPiiID`/`PiiEventStore`/`RequestsErasure`
+  (crypto-shredding), `GlobalTenantID`, an async per-organization read model
+  via `EventDispatcher`/`EventNotifier`, and the full GDPR/DSAR toolkit —
+  `SubjectExporter.Export`/`.ExportJSON`, `WithErasureLedger` +
+  `ErasureVerifier.Verify` for provable erasure, and `WrappedKeyRing` +
+  `.Rotate` for KEK rotation (see "GDPR: subject access and provable
+  erasure" below). Ends with a self-contained block of end-to-end checks
+  (`OK: ...` per line, exits non-zero on the first failure) proving balances
+  survive concurrent posting, PII is sealed at rest and decrypts correctly
+  except for an erased holder, a DSAR export (both Go struct and JSON) is
+  correct before and after erasure, erasure is independently provable via
+  the ledger, tenants stay isolated, and a tenant-less fact is visible to
+  every organization.
 - `test` — tests that only use the public API of the packages they cover:
   - `test/es`, `test/memstore` — unit tests, 100% statement coverage of
     the `es` and `es/memstore` packages.
@@ -155,17 +180,37 @@ go run ./examples/user
 
 ## Postgres
 
-```sh
-psql "$DATABASE_URL" -f es/pgstore/schema.sql
-```
-
 ```go
 import _ "github.com/lib/pq"
 
 db, _ := sql.Open("postgres", dsn)
 store := pgstore.New(db, dsn) // dsn is also used for StreamAll's dedicated pq.Listener
+if err := store.Migrate(ctx); err != nil {
+	// handle err — idempotent, safe to call on every startup, works
+	// against a brand-new empty database, no schema file to apply by hand
+}
 repo := es.NewRepository[*User](store, reg, func() *User { return &User{} })
 ```
+
+Multitenancy and PII/erasure support are both opt-in and don't change any
+of the above — see `es.WithTenant`/`es.WithAllTenants`,
+`pgstore.WithTenantIsolation` (an option to `Store.Migrate`, enabling
+row-level security as defense-in-depth), `es.WithActor`/`WithPiiID`/
+`WithMetadata`, and `es.PiiEventStore` (wraps any EventStore, sealing PII on
+Commit and opening it again on Load/FetchAfter/StreamAll — for every
+consumer of that store, not just Repository, so a projector reading
+straight off StreamAll never needs a *PiiAnonymizer of its own) +
+`pgstore.KeyRing`/`memstore.KeyRing`. For a worker that only ever operates
+within one tenant (a per-tenant projector, a per-tenant background job),
+`es.NewTenantScopedStore(store, tenantID)` binds that tenant permanently so
+no individual call inside the worker can forget `es.WithTenant` — it
+composes with `PiiEventStore` (wrap in either order). Actor and PII columns
+are themselves
+optional: `pgstore.New(db, dsn, pgstore.WithActorTracking(), pgstore.WithPiiTracking())`
+is what tells `Migrate` to create `actor_id`/`actor_type`/`pii_id` at all —
+without those options the columns are never created or queried, and
+`Commit` rejects (rather than silently drops) an event that carries an
+actor or a `PiiID` anyway.
 
 `pgstore.New` and `pgstore.NewAdvisoryLock` don't take a `*sql.DB` — they
 take a small `pgstore.DB` interface (`BeginTx`/`QueryContext`/
@@ -182,6 +227,85 @@ For side effects (calling an external API in response to an event), use a
 separate `outbox_jobs` table + `SELECT ... FOR UPDATE SKIP LOCKED` — that
 pattern isn't part of the library, since it's specific to whatever the side
 effect actually is (see `TASK.md`).
+
+## GDPR: subject access and provable erasure
+
+Built on top of `PiiEventStore`/`WithPiiID`/`RequestsErasure` (see above), a
+small toolkit in `es` answers the two questions a data controller has to
+answer under GDPR/Law 25 once a subject is identifiable by a `PiiID`:
+"show me everything you hold on this person" (a Subject Access Request), and
+"prove you actually erased it" (crypto-shredding needs paper trail, not just
+a `KeyRing.Forget` call nobody can later verify happened).
+
+**Subject Access Requests** — `es.PiiLookup` (`FetchByPiiID(ctx, piiID,
+opts...)`) is a subject-centric query across every aggregate and tenant,
+implemented by `memstore.Store` and `pgstore.Store` directly, and delegated
+through by `PiiEventStore`/`TenantScopedStore` (so wrapping doesn't hide
+it — a `PiiEventStore`-wrapped store still opens PII fields before handing
+the events back, exactly like `Load`/`FetchAfter`/`StreamAll` already do).
+`pgstore.Store` only implements it when constructed with
+`pgstore.WithPiiTracking()` (the `pii_id` column and its index don't exist
+otherwise); calling it on a store that doesn't support it returns
+`es.ErrPiiLookupUnsupported`.
+
+`es.SubjectExporter` turns that query into an actual export document,
+grouped by (tenant, aggregate):
+
+```go
+exporter := es.NewSubjectExporter(store) // store must implement es.PiiLookup
+export, err := exporter.Export(ctx, holderPiiID, es.WithTenant(orgID))
+// export.Aggregates[i].Events[j] — plaintext, or PiiUnrecoverable: true
+// for any event whose subject has since been erased
+
+json, err := exporter.ExportJSON(ctx, holderPiiID, es.WithTenant(orgID))
+// a deterministic DSAR response document — same JSON bytes for the same
+// underlying event log, safe to hand to a compliance team or a regulator
+```
+
+**Provable erasure** — `PiiAnonymizer.Forget` alone only proves the key is
+gone *now*; it says nothing about when a given crypto-shred happened or
+whether the record of it could have been tampered with afterwards. Mount an
+`es.ErasureLedger` on the `PiiEventStore` with `es.WithErasureLedger(ledger)`
+and every successful erasure appends a hash-chained `es.ShredRecord`
+(`es.CheckShredChain` verifies the whole chain, catching any record that was
+altered or removed after the fact) — implementations: `memstore.NewErasureLedger()`
+for tests/examples, `pgstore.NewErasureLedger(db)` (table `pii_shreds`,
+appends serialized with an advisory lock) for production; call its
+`Migrate(ctx)` once, same as `Store.Migrate`/`KeyRing.Migrate`.
+
+`es.ErasureVerifier` ties the three independent sources of truth together
+into one proof a regulator can be shown instead of "we deleted it, trust
+us":
+
+```go
+verifier := es.NewErasureVerifier(store, keyRing, ledger)
+proof, err := verifier.Verify(ctx, holderPiiID)
+// err == nil (or es.ErrNoErasureRecord if this subject was never erased)
+// proof.Erasures            — this subject's ledger records, chain-checked
+// proof.KeyForgotten        — the keyring no longer holds a key for them
+// proof.EventsUnrecoverable — every PII-bearing event they have reads back
+//                             as ciphertext, not plaintext
+```
+
+**Key rotation** — `es.WrappedKeyRing` wraps any `KeyRing` (`memstore.KeyRing`,
+`pgstore.KeyRing` — both implement the `KeyRingLister` it needs) in an
+envelope/KMS scheme: the bytes actually persisted are a KEK-wrapped DEK, not
+the raw per-subject key. `es.AesGcmWrapper` is a stdlib-only reference
+`KeyWrapper`; swap in a real KMS client behind the same interface for
+production. `.Rotate(ctx, newWrapper)` re-wraps every surviving subject's key
+under a new KEK — no events are re-recorded, no re-encryption of any
+payload, just the wrapping layer:
+
+```go
+keys := es.NewWrappedKeyRing(pgstore.NewKeyRing(db), es.NewAesGcmWrapper(kek1, "kek:v1"))
+// ... time passes, kek1 needs retiring ...
+if err := keys.Rotate(ctx, es.NewAesGcmWrapper(kek2, "kek:v2")); err != nil {
+	// handle err
+}
+```
+
+Live, end-to-end use of all four pieces together (including the negative
+case — verifying a subject who was never erased) — `examples/ledger/main.go`.
 
 ## Event dispatcher
 
@@ -294,14 +418,19 @@ go tool cover -func=cover.out
 ```
 
 Integration tests against a real Postgres (build tag `integration`,
-skipped without the environment variable):
+skipped without the environment variable). `test/pgstore` and `test/user`
+both point at the same PGSTORE_TEST_DSN database and both run schema
+migrations (Store.Migrate, pgstore.KeyRing.Migrate) against its shared
+`events` table — `go test` runs different packages' test binaries in
+parallel by default, and concurrent `ALTER TABLE` from two processes can hit
+Postgres's "tuple concurrently updated" error, so pass `-p 1` when running
+both together:
 
 ```sh
 docker run --rm -d --name go-es-light-pg -e POSTGRES_PASSWORD=postgres -p 5544:5432 postgres:16
-psql "postgres://postgres:postgres@localhost:5544/postgres?sslmode=disable" -f es/pgstore/schema.sql
 
 PGSTORE_TEST_DSN="postgres://postgres:postgres@localhost:5544/postgres?sslmode=disable" \
-	go test -tags=integration ./test/pgstore/... ./test/user/... -race -v
+	go test -tags=integration -p 1 ./test/pgstore/... ./test/user/... -race -v
 
 docker stop go-es-light-pg
 ```

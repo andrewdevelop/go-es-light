@@ -71,6 +71,44 @@ func WithEventID(id uuid.UUID) RecordOption {
 	return func(e *DomainEvent) { e.ID = id }
 }
 
+// WithActor records who performed the action that produced this event — an
+// employee, an operator admin, an automated system process, or an inbound
+// webhook. actorType is caller-defined (e.g. "employee", "admin", "system",
+// "webhook"); this package doesn't constrain its values. Entirely
+// optional — omit it for events with no clear human/system actor.
+func WithActor(id uuid.UUID, actorType string) RecordOption {
+	return func(e *DomainEvent) { e.ActorID = &id; e.ActorType = &actorType }
+}
+
+// WithPiiID marks this event as carrying personal data belonging to the
+// data subject identified by piiID. Entirely optional — omit it for events
+// with no PII. Combine with a *PiiAnonymizer on the Repository (see pii.go)
+// to have the event's declared PII fields encrypted at rest and later
+// decrypted, or irrecoverably shredded on an erasure request.
+func WithPiiID(piiID uuid.UUID) RecordOption {
+	return func(e *DomainEvent) { e.PiiID = &piiID }
+}
+
+// WithMetadata attaches ad-hoc, non-payload metadata to this event (e.g. a
+// GL account tag for accounting export). Entirely optional. Merges into any
+// metadata already present on the event (from an earlier WithMetadata in
+// the same opts list) rather than overwriting it, so multiple WithMetadata
+// options in one RecordThat call compose instead of clobbering each other.
+func WithMetadata(fields map[string]any) RecordOption {
+	return func(e *DomainEvent) {
+		merged := map[string]any{}
+		if len(e.Metadata) > 0 {
+			_ = json.Unmarshal(e.Metadata, &merged)
+		}
+		for k, v := range fields {
+			merged[k] = v
+		}
+		if b, err := json.Marshal(merged); err == nil {
+			e.Metadata = b
+		}
+	}
+}
+
 // RecordThat applies event to the aggregate (via ar.Apply, the aggregate's
 // own business logic) and, only if that succeeds, buffers the corresponding
 // DomainEvent to be persisted later by a Repository/EventStore. This is the

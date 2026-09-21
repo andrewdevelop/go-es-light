@@ -12,11 +12,22 @@ import (
 	"github.com/google/uuid"
 
 	"go-es-light/es"
-	"go-es-light/examples/user/adapters/eventstore"
+	"go-es-light/es/memstore"
 	"go-es-light/examples/user/adapters/readmodel"
 	"go-es-light/examples/user/app"
 	"go-es-light/examples/user/domain"
 )
+
+// newUserRepo wires up an in-memory, PII-sealing UserRepository the same
+// explicit way main.go's composition root does — no hidden constructor, so
+// each test can see (and vary) exactly what it's testing against.
+func newUserRepo() (repo *app.UserRepository, store es.EventStore, raw *memstore.Store) {
+	raw = memstore.New()
+	anonymizer := es.NewPiiAnonymizer(memstore.NewKeyRing())
+	store = es.NewPiiEventStore(raw, domain.Events(), anonymizer)
+	repo = es.NewRepository[*domain.User](store, domain.Events(), func() *domain.User { return &domain.User{} })
+	return repo, store, raw
+}
 
 // TestUserService_ConcurrentDistinctRegistrations calls RegisterUser for
 // many distinct users from many goroutines against a single UserService —
@@ -25,7 +36,7 @@ import (
 // the service/repository/aggregate path.
 func TestUserService_ConcurrentDistinctRegistrations(t *testing.T) {
 	ctx := context.Background()
-	repo, _ := eventstore.New()
+	repo, _, _ := newUserRepo()
 	svc := app.NewUserService(repo)
 
 	const users = 200
@@ -75,7 +86,7 @@ func TestUserService_ConcurrentUpdatesToSameUser(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	repo, store := eventstore.New()
+	repo, store, _ := newUserRepo()
 	svc := app.NewUserService(repo)
 
 	views := readmodel.New()

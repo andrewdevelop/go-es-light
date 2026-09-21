@@ -129,6 +129,53 @@ func TestRecordThat_WithOptionsOverridesEnvelope(t *testing.T) {
 	}
 }
 
+// TestRecordThat_WithActor covers es.WithActor, which was previously
+// untested despite being a documented, public RecordOption.
+func TestRecordThat_WithActor(t *testing.T) {
+	sub := &Subscription{}
+	sub.SetID(uuid.New())
+
+	actorID := uuid.New()
+	if err := sub.RecordThat(sub, &SubscriptionActivated{PlanID: "pro"}, es.WithActor(actorID, "employee")); err != nil {
+		t.Fatalf("RecordThat: %v", err)
+	}
+
+	e := sub.GetUncommittedEvents()[0]
+	if e.ActorID == nil || *e.ActorID != actorID {
+		t.Fatalf("expected ActorID %v, got %v", actorID, e.ActorID)
+	}
+	if e.ActorType == nil || *e.ActorType != "employee" {
+		t.Fatalf(`expected ActorType "employee", got %v`, e.ActorType)
+	}
+}
+
+// TestRecordThat_WithMetadata covers es.WithMetadata, including the
+// documented merge-not-overwrite behavior when it's given more than once in
+// the same RecordThat call.
+func TestRecordThat_WithMetadata(t *testing.T) {
+	sub := &Subscription{}
+	sub.SetID(uuid.New())
+
+	if err := sub.RecordThat(sub, &SubscriptionActivated{PlanID: "pro"},
+		es.WithMetadata(map[string]any{"gl_account": "1000", "source": "batch"}),
+		es.WithMetadata(map[string]any{"source": "api"}), // must override just this key
+	); err != nil {
+		t.Fatalf("RecordThat: %v", err)
+	}
+
+	e := sub.GetUncommittedEvents()[0]
+	var meta map[string]string
+	if err := json.Unmarshal(e.Metadata, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if meta["gl_account"] != "1000" {
+		t.Fatalf(`expected gl_account "1000" preserved from the first WithMetadata call, got %+v`, meta)
+	}
+	if meta["source"] != "api" {
+		t.Fatalf(`expected source "api" from the second WithMetadata call to win, got %+v`, meta)
+	}
+}
+
 func newDomainEvent(aggID uuid.UUID, version uint64, name string, payload string) *es.DomainEvent {
 	return &es.DomainEvent{
 		ID:               uuid.New(),

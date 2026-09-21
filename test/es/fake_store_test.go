@@ -19,20 +19,20 @@ type fakeStore struct {
 	commitErr    error
 }
 
-func (f *fakeStore) Commit(_ context.Context, _ []*es.DomainEvent, _ uint64) error {
+func (f *fakeStore) Commit(_ context.Context, _ []*es.DomainEvent, _ uint64, _ ...es.StoreOption) error {
 	f.commitCalled = true
 	return f.commitErr
 }
 
-func (f *fakeStore) Load(_ context.Context, _ uuid.UUID) ([]*es.DomainEvent, error) {
+func (f *fakeStore) Load(_ context.Context, _ uuid.UUID, _ ...es.StoreOption) ([]*es.DomainEvent, error) {
 	return f.loadEvents, f.loadErr
 }
 
-func (f *fakeStore) FetchAfter(_ context.Context, _ uint64, _ int) ([]*es.DomainEvent, error) {
+func (f *fakeStore) FetchAfter(_ context.Context, _ uint64, _ int, _ ...es.StoreOption) ([]*es.DomainEvent, error) {
 	return nil, nil
 }
 
-func (f *fakeStore) StreamAll(_ context.Context) (<-chan *es.DomainEvent, <-chan error) {
+func (f *fakeStore) StreamAll(_ context.Context, _ ...es.StoreOption) (<-chan *es.DomainEvent, <-chan error) {
 	out := make(chan *es.DomainEvent)
 	errc := make(chan error)
 	close(out)

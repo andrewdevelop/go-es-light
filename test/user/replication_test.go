@@ -15,7 +15,8 @@
 //     sitting out, and hands over cleanly when the leader releases.
 //
 // Run the same way as /test/pgstore (see its file header): needs
-// PGSTORE_TEST_DSN pointing at a Postgres with schema.sql already applied.
+// PGSTORE_TEST_DSN pointing at a Postgres database. No manual schema setup
+// needed — newReplica calls Store.Migrate itself.
 package user_test
 
 import (
@@ -46,6 +47,11 @@ type replica struct {
 	db   *sql.DB
 	repo *app.UserRepository
 	svc  *app.UserService
+	// store is the es.PiiEventStore wrapping *pgstore.Store — what repo and
+	// the projector loop (see TestReplication_ProjectorLeaderElection)
+	// actually read/write through, so PII is transparently sealed/opened
+	// without either of them needing to know PiiAnonymizer exists.
+	store es.EventStore
 	*pgstore.Store
 }
 
@@ -64,10 +70,26 @@ func newReplica(t *testing.T, dsn string) *replica {
 	// max_connections=100 between them.
 	db.SetMaxOpenConns(5)
 
-	store := pgstore.New(db, dsn)
+	// domain.User.Register/ChangeEmail now carry es.WithPiiID (Email is
+	// declared PII — see examples/user/domain/events.go), so every replica's
+	// raw Store needs WithPiiTracking or Commit rejects those events
+	// outright. The KeyRing is Postgres-backed (not memstore's, which would
+	// be process-local) and pointed at the same shared database every
+	// replica already uses, so whichever replica sealed an event, any other
+	// replica can still open it.
+	raw := pgstore.New(db, dsn, pgstore.WithPiiTracking())
+	if err := raw.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	keyring := pgstore.NewKeyRing(db)
+	if err := keyring.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate keyring: %v", err)
+	}
+	anonymizer := es.NewPiiAnonymizer(keyring)
+	store := es.NewPiiEventStore(raw, domain.Events(), anonymizer)
 	repo := es.NewRepository[*domain.User](store, domain.Events(), func() *domain.User { return &domain.User{} })
 
-	return &replica{db: db, repo: repo, svc: app.NewUserService(repo), Store: store}
+	return &replica{db: db, repo: repo, svc: app.NewUserService(repo), store: store, Store: raw}
 }
 
 func testDSN(t *testing.T) string {
@@ -237,7 +259,7 @@ func TestReplication_ProjectorLeaderElection(t *testing.T) {
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 	go func() {
-		out, errc := leader.StreamAll(streamCtx)
+		out, errc := leader.store.StreamAll(streamCtx)
 		for e := range out {
 			if err := dispatcher.Dispatch(streamCtx, e); err != nil {
 				t.Errorf("dispatch: %v", err)

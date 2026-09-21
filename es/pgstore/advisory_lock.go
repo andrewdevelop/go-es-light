@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"go-es-light/es"
 )
 
 // AdvisoryLock elects a single leader among several replicas of the same
@@ -11,12 +13,14 @@ import (
 // session-scoped advisory lock keyed by name. See TASK.md: projections need
 // strict ordering, so exactly one replica may run at a time — if the leader
 // dies, the lock is released automatically when its connection closes and
-// another replica can take over.
+// another replica can take over. Implements es.AdvisoryLock.
 type AdvisoryLock struct {
 	db   DB
 	name string
 	conn *sql.Conn
 }
+
+var _ es.AdvisoryLock = (*AdvisoryLock)(nil)
 
 // NewAdvisoryLock creates a lock keyed by name. Two AdvisoryLocks with the
 // same name (even across processes) never both succeed in TryAcquire.
@@ -36,13 +40,16 @@ func (l *AdvisoryLock) TryAcquire(ctx context.Context) (bool, error) {
 	}
 
 	var acquired bool
-	err = conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock(hashtext($1))`, l.name).Scan(&acquired)
-	if err != nil {
-		conn.Close()
+	if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock(hashtext($1))`, l.name).Scan(&acquired); err != nil {
+		if closeErr := conn.Close(); closeErr != nil {
+			return false, fmt.Errorf("pgstore: try advisory lock: %w (additionally, close conn failed: %v)", err, closeErr)
+		}
 		return false, fmt.Errorf("pgstore: try advisory lock: %w", err)
 	}
 	if !acquired {
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			return false, fmt.Errorf("pgstore: close conn after failed acquire: %w", closeErr)
+		}
 		return false, nil
 	}
 
@@ -52,15 +59,23 @@ func (l *AdvisoryLock) TryAcquire(ctx context.Context) (bool, error) {
 
 // Release gives up leadership and returns the connection to the pool. Safe
 // to call even if TryAcquire was never called or already failed.
-func (l *AdvisoryLock) Release(ctx context.Context) error {
+func (l *AdvisoryLock) Release(ctx context.Context) (err error) {
 	if l.conn == nil {
 		return nil
 	}
 	conn := l.conn
 	l.conn = nil
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			if err != nil {
+				err = fmt.Errorf("%w (additionally, close conn failed: %v)", err, closeErr)
+			} else {
+				err = fmt.Errorf("pgstore: close conn: %w", closeErr)
+			}
+		}
+	}()
 
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_unlock(hashtext($1))`, l.name); err != nil {
+	if _, err = conn.ExecContext(ctx, `SELECT pg_advisory_unlock(hashtext($1))`, l.name); err != nil {
 		return fmt.Errorf("pgstore: advisory unlock: %w", err)
 	}
 	return nil
