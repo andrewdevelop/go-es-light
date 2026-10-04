@@ -19,8 +19,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
-	"go-es-light/es/pgstore"
+	"github.com/andrewdevelop/go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es/pgstore"
 )
 
 func piiEvent(aggID uuid.UUID, version uint64, name string, pii *uuid.UUID, tenant uuid.UUID) *es.DomainEvent {

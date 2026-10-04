@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es"
 )
 
 // KeyRing is a Postgres-backed es.KeyRing, storing one row per data subject

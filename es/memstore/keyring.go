@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es"
 )
 
 // KeyRing is a concurrency-safe, in-memory es.KeyRing. Like Store, it is

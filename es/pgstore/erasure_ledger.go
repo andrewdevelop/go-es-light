@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es"
 )
 
 // ErasureLedger is a Postgres-backed es.ErasureLedger, storing one

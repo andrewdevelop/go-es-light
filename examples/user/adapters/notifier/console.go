@@ -11,9 +11,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
-	"go-es-light/examples/user/app"
-	"go-es-light/examples/user/domain"
+	"github.com/andrewdevelop/go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/examples/user/app"
+	"github.com/andrewdevelop/go-es-light/examples/user/domain"
 )
 
 var _ app.Notifier = (*Console)(nil)

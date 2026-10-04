@@ -3,7 +3,7 @@
 // examples/user/domain.
 package domain
 
-import "go-es-light/es"
+import "github.com/andrewdevelop/go-es-light/es"
 
 // Event names use dot notation (aggregate.action) so an es.EventDispatcher
 // subscriber can match either one exactly or every ledger.* event with a

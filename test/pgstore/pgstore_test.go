@@ -15,8 +15,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
-	"go-es-light/es/pgstore"
+	"github.com/andrewdevelop/go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es/pgstore"
 )
 
 func mkEvent(aggID uuid.UUID, version uint64, name string, payload string) *es.DomainEvent {

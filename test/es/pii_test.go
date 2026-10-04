@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
-	"go-es-light/es/memstore"
+	"github.com/andrewdevelop/go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es/memstore"
 )
 
 // --- a tiny PII-carrying aggregate used only by these tests ---

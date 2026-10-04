@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es"
 )
 
 var (

@@ -1,4 +1,4 @@
-module go-es-light
+module github.com/andrewdevelop/go-es-light
 
 go 1.26
 

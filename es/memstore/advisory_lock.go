@@ -3,7 +3,7 @@ package memstore
 import (
 	"context"
 
-	"go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es"
 )
 
 // AdvisoryLock is a no-op es.AdvisoryLock. An in-memory Store only ever

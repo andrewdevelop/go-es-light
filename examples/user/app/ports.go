@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
-	"go-es-light/examples/user/domain"
+	"github.com/andrewdevelop/go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/examples/user/domain"
 )
 
 // UserRepository is the driven port for persistence: es.Repository already

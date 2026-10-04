@@ -10,8 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/examples/user/adapters/readmodel"
-	"go-es-light/examples/user/app"
+	"github.com/andrewdevelop/go-es-light/examples/user/adapters/readmodel"
+	"github.com/andrewdevelop/go-es-light/examples/user/app"
 )
 
 // TestReadModelStore_ConcurrentAccess hammers Upsert/Get for both

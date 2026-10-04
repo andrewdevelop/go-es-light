@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es"
 )
 
 // aggregateKey scopes an aggregate's events to the tenant they belong to

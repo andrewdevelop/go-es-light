@@ -54,12 +54,12 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
-	"go-es-light/es/memstore"
-	"go-es-light/examples/user/adapters/notifier"
-	"go-es-light/examples/user/adapters/readmodel"
-	"go-es-light/examples/user/app"
-	"go-es-light/examples/user/domain"
+	"github.com/andrewdevelop/go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es/memstore"
+	"github.com/andrewdevelop/go-es-light/examples/user/adapters/notifier"
+	"github.com/andrewdevelop/go-es-light/examples/user/adapters/readmodel"
+	"github.com/andrewdevelop/go-es-light/examples/user/app"
+	"github.com/andrewdevelop/go-es-light/examples/user/domain"
 )
 
 func main() {

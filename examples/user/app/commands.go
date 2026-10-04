@@ -3,7 +3,7 @@ package app
 import (
 	"github.com/google/uuid"
 
-	"go-es-light/examples/user/domain"
+	"github.com/andrewdevelop/go-es-light/examples/user/domain"
 )
 
 // Commands are plain data — what an inbound adapter (HTTP handler, CLI,

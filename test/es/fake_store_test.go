@@ -5,7 +5,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es"
 )
 
 // fakeStore is a minimal, fully-configurable es.EventStore used to exercise

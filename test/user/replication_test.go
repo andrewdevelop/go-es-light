@@ -33,11 +33,11 @@ import (
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 
-	"go-es-light/es"
-	"go-es-light/es/pgstore"
-	"go-es-light/examples/user/adapters/readmodel"
-	"go-es-light/examples/user/app"
-	"go-es-light/examples/user/domain"
+	"github.com/andrewdevelop/go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es/pgstore"
+	"github.com/andrewdevelop/go-es-light/examples/user/adapters/readmodel"
+	"github.com/andrewdevelop/go-es-light/examples/user/app"
+	"github.com/andrewdevelop/go-es-light/examples/user/domain"
 )
 
 // replica stands in for one app instance: its own DB pool, its own

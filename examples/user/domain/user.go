@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es"
 )
 
 // Actor identifies who performed the action that produced an event — see

@@ -34,7 +34,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es"
 )
 
 // PollInterval is the fallback polling cadence used by StreamAll when no

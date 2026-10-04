@@ -3,7 +3,7 @@
 // points inward, per the dependency rule.
 package domain
 
-import "go-es-light/es"
+import "github.com/andrewdevelop/go-es-light/es"
 
 // --- domain events ---
 //

@@ -49,9 +49,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
-	"go-es-light/es/memstore"
-	"go-es-light/examples/ledger/domain"
+	"github.com/andrewdevelop/go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es/memstore"
+	"github.com/andrewdevelop/go-es-light/examples/ledger/domain"
 )
 
 // --- fixture: 2 organizations, 3 accounts each ---

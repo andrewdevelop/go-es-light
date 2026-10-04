@@ -8,8 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"go-es-light/es"
-	"go-es-light/es/memstore"
+	"github.com/andrewdevelop/go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es/memstore"
 )
 
 // --- fakes: a fallible KeyRing and a deterministic KeyWrapper ---

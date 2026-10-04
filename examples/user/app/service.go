@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"go-es-light/es"
-	"go-es-light/examples/user/domain"
+	"github.com/andrewdevelop/go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/examples/user/domain"
 )
 
 // UserService is the use-case layer: each method loads history, replays it,

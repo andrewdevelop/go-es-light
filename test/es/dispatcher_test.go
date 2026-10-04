@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es"
 )
 
 func TestDispatcher_ProjectorRuns(t *testing.T) {

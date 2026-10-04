@@ -27,7 +27,7 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"go-es-light/es/pgstore"
+	"github.com/andrewdevelop/go-es-light/es/pgstore"
 )
 
 // testDSN returns PGSTORE_TEST_DSN, skipping the test if it isn't set.

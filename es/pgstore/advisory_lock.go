@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"go-es-light/es"
+	"github.com/andrewdevelop/go-es-light/es"
 )
 
 // AdvisoryLock elects a single leader among several replicas of the same
