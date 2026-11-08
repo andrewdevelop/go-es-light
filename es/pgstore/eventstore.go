@@ -93,6 +93,7 @@ func New(db DB, dsn string, opts ...Option) *Store {
 // row-level security.
 type migrateConfig struct {
 	tenantIsolation bool
+	strict          bool
 }
 
 // MigrateOption customizes a single Migrate call. See WithTenantIsolation.
@@ -100,7 +101,9 @@ type MigrateOption func(*migrateConfig)
 
 // WithTenantIsolation additionally enables Postgres row-level security on
 // events as defense-in-depth for multitenancy, on top of the WHERE
-// tenant_id filtering Commit/Load/FetchAfter already do in Go. A stronger
+// tenant_id filtering Commit/Load/FetchAfter already do in Go (reads set
+// app.tenant_id too, so the policy applies to them). See
+// WithStrictTenantIsolation for a deny-by-default policy. A stronger
 // commitment than the rest of Migrate: the policy itself is permissive by
 // default (a session that never calls Commit/Load with es.WithTenant sees
 // every row, unaffected), but FORCE ROW LEVEL SECURITY does mean this
@@ -119,6 +122,20 @@ type MigrateOption func(*migrateConfig)
 // without the BYPASSRLS attribute.
 func WithTenantIsolation() MigrateOption {
 	return func(c *migrateConfig) { c.tenantIsolation = true }
+}
+
+// WithStrictTenantIsolation enables row-level security like
+// WithTenantIsolation, but installs a strict policy instead of the
+// permissive one: a session with no app.tenant_id (or an empty one) sees no
+// rows at all, and a session scoped to tenant X sees X's rows plus the
+// es.GlobalTenantID platform rows. Load, FetchAfter, StreamAll and
+// FetchByPiiID set app.tenant_id for es.WithTenant / es.WithAllTenants
+// calls, so the application role stays isolated by the database itself;
+// a call with neither option sees nothing, and so does es.WithAllTenants
+// (it clears the variable). Platform-wide readers and writers should
+// connect as a role granted GrantTenantBypass. Implies WithTenantIsolation.
+func WithStrictTenantIsolation() MigrateOption {
+	return func(c *migrateConfig) { c.tenantIsolation = true; c.strict = true }
 }
 
 // Migrate idempotently brings the database up to the shape this Store
@@ -223,17 +240,31 @@ func (s *Store) Migrate(ctx context.Context, opts ...MigrateOption) error {
 	}
 
 	if cfg.tenantIsolation {
+		// CASE (not an OR chain) so the ::uuid cast can never be evaluated
+		// against an empty setting, which would raise invalid input syntax.
+		policy := `CREATE POLICY events_tenant_isolation ON events
+				USING (
+					CASE WHEN coalesce(current_setting('app.tenant_id', true), '') = ''
+						THEN true
+						ELSE tenant_id = current_setting('app.tenant_id', true)::uuid
+							OR tenant_id = '00000000-0000-0000-0000-000000000000'
+					END
+				)`
+		if cfg.strict {
+			policy = `CREATE POLICY events_tenant_isolation ON events
+				USING (
+					CASE WHEN coalesce(current_setting('app.tenant_id', true), '') = ''
+						THEN false
+						ELSE tenant_id = current_setting('app.tenant_id', true)::uuid
+							OR tenant_id = '00000000-0000-0000-0000-000000000000'
+					END
+				)`
+		}
 		stmts = append(stmts,
 			`ALTER TABLE events ENABLE ROW LEVEL SECURITY`,
 			`ALTER TABLE events FORCE ROW LEVEL SECURITY`,
 			`DROP POLICY IF EXISTS events_tenant_isolation ON events`,
-			`CREATE POLICY events_tenant_isolation ON events
-				USING (
-					current_setting('app.tenant_id', true) IS NULL
-					OR current_setting('app.tenant_id', true) = ''
-					OR tenant_id = current_setting('app.tenant_id', true)::uuid
-					OR tenant_id = '00000000-0000-0000-0000-000000000000'
-				)`,
+			policy,
 		)
 	}
 
@@ -380,6 +411,47 @@ func (s *Store) Commit(ctx context.Context, events []*es.DomainEvent, expectedVe
 	return nil
 }
 
+// queryEvents runs a read query and scans the result. When cfg carries a
+// tenant scope it runs inside a short read-only transaction that first sets
+// app.tenant_id (mirroring Commit), so the RLS policy applies to reads too;
+// with neither es.WithTenant nor es.WithAllTenants the variable is left
+// unset and the query goes straight to the pool.
+func (s *Store) queryEvents(ctx context.Context, cfg es.StoreConfig, query string, args ...any) (events []*es.DomainEvent, err error) {
+	if cfg.TenantID == nil && !cfg.AllTenants {
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		return s.scanEvents(rows)
+	}
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		// Nothing was written; Rollback is the cheapest way to end it.
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) && err == nil {
+			err = rbErr
+		}
+	}()
+
+	if cfg.TenantID != nil {
+		_, err = tx.ExecContext(ctx, `SELECT set_config('app.tenant_id', $1, true)`, cfg.TenantID.String())
+	} else {
+		_, err = tx.ExecContext(ctx, `SELECT set_config('app.tenant_id', '', true)`)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("set tenant context: %w", err)
+	}
+
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return s.scanEvents(rows)
+}
+
 // Load implements es.EventStore. opts is optional — see es.WithTenant. When
 // given, an aggregate id that exists only under a different tenant behaves
 // as not found (ErrAggregateNotFound), same as if it never existed.
@@ -394,14 +466,9 @@ func (s *Store) Load(ctx context.Context, id uuid.UUID, opts ...es.StoreOption) 
 	}
 	query := "SELECT " + strings.Join(s.columns(), ", ") + " FROM events WHERE " + strings.Join(conditions, " AND ") + " ORDER BY aggregate_version ASC"
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	events, err := s.queryEvents(ctx, cfg, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pgstore: load: %w", err)
-	}
-
-	events, err := s.scanEvents(rows)
-	if err != nil {
-		return nil, err
 	}
 	if len(events) == 0 {
 		return nil, es.ErrAggregateNotFound
@@ -425,12 +492,11 @@ func (s *Store) FetchAfter(ctx context.Context, lastID uint64, limit int, opts .
 	query := "SELECT " + strings.Join(s.columns(), ", ") + " FROM events WHERE " + strings.Join(conditions, " AND ") +
 		" ORDER BY global_id ASC LIMIT " + placeholder(len(args))
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	events, err := s.queryEvents(ctx, cfg, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pgstore: fetch after: %w", err)
 	}
-
-	return s.scanEvents(rows)
+	return events, nil
 }
 
 // StreamAll implements es.EventStore. It backfills every event from
@@ -539,14 +605,9 @@ func (s *Store) FetchByPiiID(ctx context.Context, piiID uuid.UUID, opts ...es.St
 	query := "SELECT " + strings.Join(s.columns(), ", ") + " FROM events WHERE " + strings.Join(conditions, " AND ") +
 		" ORDER BY global_id ASC"
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	events, err := s.queryEvents(ctx, cfg, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pgstore: fetch by pii id: %w", err)
-	}
-
-	events, err := s.scanEvents(rows)
-	if err != nil {
-		return nil, err
 	}
 	if len(events) == 0 {
 		return nil, es.ErrSubjectNotFound

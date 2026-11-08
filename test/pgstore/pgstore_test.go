@@ -646,3 +646,148 @@ func sanitizeRoleName(s string) string {
 	}
 	return string(out)
 }
+
+// TestPgstore_ReadsApplyRLS proves Load/FetchAfter/StreamAll/FetchByPiiID set
+// app.tenant_id, so the database policy (not just the Go-side WHERE) scopes
+// reads for a non-superuser, NOBYPASSRLS role — under both policies.
+func TestPgstore_ReadsApplyRLS(t *testing.T) {
+	ctx := context.Background()
+	dsn := testDSN(t)
+	admin, pool := newStore(t, pgstore.WithPiiTracking())
+
+	tenantA, tenantB := uuid.New(), uuid.New()
+	piiID := uuid.New()
+	aggA, aggB, aggG := uuid.New(), uuid.New(), uuid.New()
+	mk := func(agg uuid.UUID) []*es.DomainEvent {
+		e := mkEvent(agg, 1, "Created", `{}`)
+		e.PiiID = &piiID
+		return []*es.DomainEvent{e}
+	}
+	// Seed as the superuser, which bypasses RLS whatever the policy.
+	if err := admin.Commit(ctx, mk(aggA), 0, es.WithTenant(tenantA)); err != nil {
+		t.Fatalf("seed A: %v", err)
+	}
+	if err := admin.Commit(ctx, mk(aggB), 0, es.WithTenant(tenantB)); err != nil {
+		t.Fatalf("seed B: %v", err)
+	}
+	if err := admin.Commit(ctx, mk(aggG), 0, es.WithTenant(es.GlobalTenantID)); err != nil {
+		t.Fatalf("seed global: %v", err)
+	}
+
+	roleName := "rls_read_" + sanitizeRoleName(uuid.New().String())
+	if _, err := pool.ExecContext(ctx, `CREATE ROLE `+roleName+` LOGIN PASSWORD 'test' NOSUPERUSER NOBYPASSRLS`); err != nil {
+		t.Fatalf("CREATE ROLE: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.ExecContext(context.Background(), `DROP OWNED BY `+roleName+`; DROP ROLE IF EXISTS `+roleName)
+	})
+	if _, err := pool.ExecContext(ctx, `GRANT SELECT ON events TO `+roleName); err != nil {
+		t.Fatalf("GRANT: %v", err)
+	}
+
+	roleDB, err := sql.Open("postgres", roleDSN(t, dsn, roleName, "test"))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { roleDB.Close() })
+	roleDB.SetMaxOpenConns(5)
+	reader := pgstore.New(roleDB, roleDSN(t, dsn, roleName, "test"), pgstore.WithPiiTracking())
+
+	// readAll runs every read path and returns the aggregate ids each saw
+	// (restricted to this test's three aggregates).
+	readAll := func(t *testing.T, opts ...es.StoreOption) map[string]map[uuid.UUID]bool {
+		t.Helper()
+		mine := map[uuid.UUID]bool{aggA: true, aggB: true, aggG: true}
+		collect := func(evs []*es.DomainEvent) map[uuid.UUID]bool {
+			out := map[uuid.UUID]bool{}
+			for _, e := range evs {
+				if mine[e.AggregateID] {
+					out[e.AggregateID] = true
+				}
+			}
+			return out
+		}
+		res := map[string]map[uuid.UUID]bool{}
+
+		load := map[uuid.UUID]bool{}
+		for _, id := range []uuid.UUID{aggA, aggB, aggG} {
+			if evs, err := reader.Load(ctx, id, opts...); err == nil {
+				load[id] = len(evs) > 0
+			} else if !errors.Is(err, es.ErrAggregateNotFound) {
+				t.Fatalf("Load: %v", err)
+			}
+		}
+		res["Load"] = load
+
+		evs, err := reader.FetchAfter(ctx, 0, 100000, opts...)
+		if err != nil {
+			t.Fatalf("FetchAfter: %v", err)
+		}
+		res["FetchAfter"] = collect(evs)
+
+		evs, err = reader.FetchByPiiID(ctx, piiID, opts...)
+		if err != nil && !errors.Is(err, es.ErrSubjectNotFound) {
+			t.Fatalf("FetchByPiiID: %v", err)
+		}
+		res["FetchByPiiID"] = collect(evs)
+
+		sctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		out, errc := reader.StreamAll(sctx, opts...)
+		var streamed []*es.DomainEvent
+		timeout := time.After(1500 * time.Millisecond)
+	loop:
+		for {
+			select {
+			case e, ok := <-out:
+				if !ok {
+					break loop
+				}
+				streamed = append(streamed, e)
+			case <-timeout:
+				cancel()
+				break loop
+			}
+		}
+		for range out {
+		}
+		if err := <-errc; err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("StreamAll: %v", err)
+		}
+		res["StreamAll"] = collect(streamed)
+		return res
+	}
+
+	check := func(t *testing.T, got map[string]map[uuid.UUID]bool, want ...uuid.UUID) {
+		t.Helper()
+		for path, seen := range got {
+			if len(seen) != len(want) {
+				t.Errorf("%s: saw %d aggregates, want %d (%v)", path, len(seen), len(want), seen)
+			}
+			for _, w := range want {
+				if !seen[w] {
+					t.Errorf("%s: missing aggregate %v", path, w)
+				}
+			}
+		}
+	}
+
+	t.Run("strict", func(t *testing.T) {
+		if err := admin.Migrate(ctx, pgstore.WithStrictTenantIsolation()); err != nil {
+			t.Fatalf("Migrate strict: %v", err)
+		}
+		check(t, readAll(t, es.WithTenant(tenantA)), aggA, aggG)
+		check(t, readAll(t, es.WithTenant(tenantB)), aggB, aggG)
+		check(t, readAll(t))                      // no tenant context: nothing
+		check(t, readAll(t, es.WithAllTenants())) // cleared variable: nothing
+	})
+
+	t.Run("permissive", func(t *testing.T) {
+		if err := admin.Migrate(ctx, pgstore.WithTenantIsolation()); err != nil {
+			t.Fatalf("Migrate permissive: %v", err)
+		}
+		check(t, readAll(t, es.WithTenant(tenantA)), aggA, aggG)
+		check(t, readAll(t), aggA, aggB, aggG)
+		check(t, readAll(t, es.WithAllTenants()), aggA, aggB, aggG)
+	})
+}
